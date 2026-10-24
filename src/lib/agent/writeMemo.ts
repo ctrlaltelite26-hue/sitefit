@@ -1,6 +1,6 @@
 import { generateObject } from "ai";
-import { anthropic } from "@ai-sdk/anthropic";
-import { createOpenAI, openai } from "@ai-sdk/openai";
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { createOpenAI } from "@ai-sdk/openai";
 import type { z } from "zod";
 import { memoDraftSchema, type MemoDraft } from "@/lib/agent/memoSchema";
 import { loadLocalEnv } from "@/lib/load-env";
@@ -31,20 +31,50 @@ export type MemoPacket = {
 
 export type MemoCompleter = (packet: MemoPacket) => Promise<unknown>;
 
+function compatibleBase(baseURL: string) {
+  const url = new URL(baseURL);
+  const pathname = url.pathname.replace(/\/+$/, "").replace(/\/chat\/completions$/, "");
+  return `${url.origin}${pathname}`;
+}
+
 function qwenSettings() {
   loadLocalEnv();
   const apiKey = process.env.QWEN_CLOUD_API_KEY?.trim();
   const baseURL = process.env.QWEN_CLOUD_BASE_URL?.trim();
   const model = process.env.QWEN_MODEL?.trim();
   if (!apiKey || !baseURL || !model) return null;
-  const url = new URL(baseURL);
-  const pathname = url.pathname.replace(/\/+$/, "").replace(/\/chat\/completions$/, "");
-  return { apiKey, baseURL: `${url.origin}${pathname}`, model };
+  return { apiKey, baseURL: compatibleBase(baseURL), model };
+}
+
+function openaiSettings() {
+  loadLocalEnv();
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) return null;
+  const baseURL = process.env.OPENAI_BASE_URL?.trim();
+  const model = process.env.OPENAI_MODEL?.trim() || process.env.MEMO_MODEL?.trim() || "gpt-4o-mini";
+  return { apiKey, baseURL: baseURL ? compatibleBase(baseURL) : undefined, model };
+}
+
+function anthropicSettings() {
+  loadLocalEnv();
+  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+  if (!apiKey) return null;
+  const baseURL = process.env.ANTHROPIC_BASE_URL?.trim();
+  const model = process.env.ANTHROPIC_MODEL?.trim() || process.env.MEMO_MODEL?.trim() || "claude-haiku-4-5";
+  return { apiKey, baseURL: baseURL ? baseURL.replace(/\/+$/, "") : undefined, model };
+}
+
+export type MemoProvider = "openai" | "qwen" | "anthropic";
+
+export function memoProvider(): MemoProvider | null {
+  if (openaiSettings()) return "openai";
+  if (anthropicSettings()) return "anthropic";
+  if (qwenSettings()) return "qwen";
+  return null;
 }
 
 export function hasModelKey() {
-  loadLocalEnv();
-  return Boolean(qwenSettings() || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY);
+  return Boolean(memoProvider());
 }
 
 function knownNumbers(packet: MemoPacket) {
@@ -190,30 +220,42 @@ function memoFromDraft(packet: MemoPacket, draft: MemoDraft): Memo {
   };
 }
 
+function languageModel() {
+  const provider = memoProvider();
+  if (provider === "openai") {
+    const openai = openaiSettings();
+    if (!openai) return null;
+    return createOpenAI({ baseURL: openai.baseURL, apiKey: openai.apiKey }).chat(openai.model);
+  }
+  if (provider === "qwen") {
+    const qwen = qwenSettings();
+    if (!qwen) return null;
+    return createOpenAI({
+      baseURL: qwen.baseURL,
+      apiKey: qwen.apiKey,
+      fetch: async (input, init) => {
+        if (init?.body && typeof init.body === "string") {
+          try {
+            const body = JSON.parse(init.body) as Record<string, unknown>;
+            body.enable_thinking = false;
+            init = { ...init, body: JSON.stringify(body) };
+          } catch {
+            // Keep the original body when it is not JSON.
+          }
+        }
+        return fetch(input, init);
+      },
+    }).chat(qwen.model);
+  }
+  const anthropic = anthropicSettings();
+  if (!anthropic) return null;
+  return createAnthropic({ baseURL: anthropic.baseURL, apiKey: anthropic.apiKey })(anthropic.model);
+}
+
 export async function completeWithModel(system: string, prompt: string, schema: z.ZodType) {
   loadLocalEnv();
-  if (!hasModelKey()) return null;
-  const qwen = qwenSettings();
-  const model = qwen
-    ? createOpenAI({
-        baseURL: qwen.baseURL,
-        apiKey: qwen.apiKey,
-        fetch: async (input, init) => {
-          if (init?.body && typeof init.body === "string") {
-            try {
-              const body = JSON.parse(init.body) as Record<string, unknown>;
-              body.enable_thinking = false;
-              init = { ...init, body: JSON.stringify(body) };
-            } catch {
-              // Keep the original body when it is not JSON.
-            }
-          }
-          return fetch(input, init);
-        },
-      }).chat(qwen.model)
-    : process.env.OPENAI_API_KEY
-      ? openai(process.env.MEMO_MODEL ?? "gpt-4o-mini")
-      : anthropic(process.env.MEMO_MODEL ?? "claude-haiku-4-5");
+  const model = languageModel();
+  if (!model) return null;
   const { object } = await generateObject({
     model,
     schema,

@@ -4,7 +4,7 @@ import { buildCustomDeal, buildPresetDeal } from "../build-deal";
 import { conceptsForPreset } from "../presets";
 import { runDeal } from "./runDeal";
 import { runSavedDeal } from "./runSavedDeal";
-import { templateMemo, writeMemo, type MemoPacket } from "./writeMemo";
+import { memoProvider, templateMemo, writeMemo, type MemoPacket } from "./writeMemo";
 import { normalizeEntities } from "../qloo/normalize";
 import { playbackBody } from "../qloo/playback";
 import { saveDeal } from "../store";
@@ -164,6 +164,29 @@ test("an unknown custom pair fails honestly", async () => {
   const result = await runDeal({ locality: deal.localityQuery, concepts: deal.concepts }, playbackDeps);
   assert.equal(result.insufficient, true);
   assert.equal(result.memo, null);
+});
+
+test("openai is the memo writer when all three keys are set", () => {
+  memoProvider();
+  const keys = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "QWEN_CLOUD_API_KEY", "QWEN_CLOUD_BASE_URL", "QWEN_MODEL"] as const;
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  try {
+    process.env.OPENAI_API_KEY = "sk-test-openai";
+    process.env.ANTHROPIC_API_KEY = "sk-ant-test";
+    process.env.QWEN_CLOUD_API_KEY = "sk-test-qwen";
+    process.env.QWEN_CLOUD_BASE_URL = "https://example.test/compatible-mode/v1";
+    process.env.QWEN_MODEL = "qwen-test";
+    assert.equal(memoProvider(), "openai");
+    delete process.env.OPENAI_API_KEY;
+    assert.equal(memoProvider(), "anthropic");
+    delete process.env.ANTHROPIC_API_KEY;
+    assert.equal(memoProvider(), "qwen");
+  } finally {
+    for (const key of keys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
 });
 
 test("invalid model output retries once and then uses the template", async () => {
