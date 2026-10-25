@@ -19,6 +19,6 @@ export async function openDeal(formData: FormData) {
         });
 
   if (!deal) return;
-  saveDeal(deal);
+  await saveDeal(deal);
   redirect(`/deals/${deal.id}`);
 }

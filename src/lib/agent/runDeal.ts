@@ -2,6 +2,7 @@ import { qlooMode } from "@/lib/qloo/client";
 import { insights } from "@/lib/qloo/insights";
 import type { QlooEntity } from "@/lib/qloo/normalize";
 import { searchEntities } from "@/lib/qloo/search";
+import { formatSeconds, type RunProgress } from "@/lib/agent/progress";
 import { writeMemo, type MemoPacket, type PacketEntity } from "@/lib/agent/writeMemo";
 import { scoreConcept } from "@/lib/scoring";
 import type { DealConcept, Hop, HopEntity } from "@/types/deal";
@@ -15,6 +16,7 @@ export type RunDeps = {
   search: SearchFn;
   insights: InsightFn;
   source?: "fixture" | "live";
+  onProgress?: (event: RunProgress) => void;
 };
 
 export type RunInput = {
@@ -66,6 +68,7 @@ function nameDrivers(entities: HopEntity[], names: Map<string, string>) {
 export async function runDeal(input: RunInput, deps: RunDeps = { search: searchEntities, insights }): Promise<RunOutput> {
   const hops: Hop[] = [];
   let calls = 0;
+  const report = (event: RunProgress) => deps.onProgress?.(event);
 
   async function hop(
     id: string,
@@ -93,6 +96,8 @@ export async function runDeal(input: RunInput, deps: RunDeps = { search: searchE
     return { id, entities: rows };
   }
 
+  report({ id: "site", status: "running" });
+  const siteStarted = Date.now();
   const sitePlaces = await hop("site-places", "Resolve site", "urn:entity:place", input.locality, () =>
     deps.insights({
       "filter.type": "urn:entity:place",
@@ -100,9 +105,18 @@ export async function runDeal(input: RunInput, deps: RunDeps = { search: searchE
       take: "8",
     }),
   );
+  report({
+    id: "site",
+    status: "done",
+    detail: `${sitePlaces.entities.length} entities`,
+    duration: formatSeconds(Date.now() - siteStarted),
+  });
 
   const anchors = new Map<string, string[]>();
   const anchorNames = new Map<string, string>();
+  report({ id: "concepts", status: "running" });
+  const searchStarted = Date.now();
+  let resolvedAnchors = 0;
   for (const concept of input.concepts) {
     const ids: string[] = [];
     for (const [index, anchor] of concept.anchorQueries.entries()) {
@@ -119,14 +133,23 @@ export async function runDeal(input: RunInput, deps: RunDeps = { search: searchE
       const hit = preferred ?? found.entities[0];
       const id = hit?.entityId ?? anchor.entityId;
       if (id) {
+        resolvedAnchors += 1;
         ids.push(id);
         anchorNames.set(id.toUpperCase(), anchor.query);
       }
     }
     anchors.set(concept.id, ids);
   }
+  report({
+    id: "concepts",
+    status: "done",
+    detail: `${resolvedAnchors} anchors`,
+    duration: formatSeconds(Date.now() - searchStarted),
+  });
 
-  await hop("taste-brands", "Neighborhood brands", "urn:entity:brand", input.locality, () =>
+  report({ id: "brands", status: "running" });
+  const brandsStarted = Date.now();
+  const neighborhoodBrands = await hop("taste-brands", "Neighborhood brands", "urn:entity:brand", input.locality, () =>
     deps.insights({
       "filter.type": "urn:entity:brand",
       "signal.location.query": input.locality,
@@ -134,7 +157,16 @@ export async function runDeal(input: RunInput, deps: RunDeps = { search: searchE
       take: "8",
     }),
   );
-  await hop("taste-artists", "Neighborhood artists", "urn:entity:artist", input.locality, () =>
+  report({
+    id: "brands",
+    status: "done",
+    detail: `${neighborhoodBrands.entities.length} entities`,
+    duration: formatSeconds(Date.now() - brandsStarted),
+  });
+
+  report({ id: "artists", status: "running" });
+  const artistsStarted = Date.now();
+  const neighborhoodArtists = await hop("taste-artists", "Neighborhood artists", "urn:entity:artist", input.locality, () =>
     deps.insights({
       "filter.type": "urn:entity:artist",
       "signal.location.query": input.locality,
@@ -142,9 +174,18 @@ export async function runDeal(input: RunInput, deps: RunDeps = { search: searchE
       take: "8",
     }),
   );
+  report({
+    id: "artists",
+    status: "done",
+    detail: `${neighborhoodArtists.entities.length} entities`,
+    duration: formatSeconds(Date.now() - artistsStarted),
+  });
 
   const packetConcepts: MemoPacket["concepts"] = [];
-  for (const concept of input.concepts) {
+  for (const [conceptIndex, concept] of input.concepts.entries()) {
+    const step = conceptIndex === 0 ? "score-a" : "score-b";
+    report({ id: step, status: "running" });
+    const scoreStarted = Date.now();
     const ids = anchors.get(concept.id) ?? [];
     const interest = ids.join(",");
     let placeRows: HopEntity[] = [];
@@ -201,6 +242,12 @@ export async function runDeal(input: RunInput, deps: RunDeps = { search: searchE
       }
     }
 
+    report({
+      id: step,
+      status: "done",
+      detail: `${placeRows.length + brandRows.length} entities`,
+      duration: formatSeconds(Date.now() - scoreStarted),
+    });
     nameDrivers(placeRows, anchorNames);
     nameDrivers(brandRows, anchorNames);
     const score = scoreConcept({
@@ -224,10 +271,18 @@ export async function runDeal(input: RunInput, deps: RunDeps = { search: searchE
   }
 
   const warnings = sitePlaces.entities.length === 0 ? ["The site place hop returned no entities."] : [];
+  report({ id: "memo", status: "running" });
+  const memoStarted = Date.now();
   const memo = await writeMemo(
     { locality: input.locality, concepts: packetConcepts, warnings },
     deps.source === "fixture" ? null : undefined,
   );
+  report({
+    id: "memo",
+    status: "done",
+    detail: memo ? "memo" : "—",
+    duration: formatSeconds(Date.now() - memoStarted),
+  });
   return {
     hops,
     memo,

@@ -16,6 +16,22 @@ const playbackDeps = {
   insights: async (params: Record<string, string>) => normalizeEntities(playbackBody("/v2/insights", params)),
 };
 
+test("progress reports each stage before the memo is finished", async () => {
+  const concepts = conceptsForPreset("west-village-wine-vs-sports");
+  assert.ok(concepts);
+  if (!concepts) return;
+  const events: string[] = [];
+  await runDeal({ locality: "West Village", concepts }, {
+    ...playbackDeps,
+    onProgress: (event) => events.push(`${event.id}:${event.status}`),
+  });
+  assert.ok(events.indexOf("site:done") < events.indexOf("memo:running"));
+  assert.ok(events.indexOf("memo:running") < events.indexOf("memo:done"));
+  assert.ok(events.includes("artists:done"));
+  assert.ok(events.includes("score-a:done"));
+  assert.ok(events.includes("score-b:done"));
+});
+
 test("preset 1 runs the loop in order and stays inside the call budget", async () => {
   const concepts = conceptsForPreset("west-village-wine-vs-sports");
   assert.ok(concepts);

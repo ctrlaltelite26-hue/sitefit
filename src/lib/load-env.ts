@@ -8,7 +8,7 @@ export function loadLocalEnv() {
   if (loaded) return;
   loaded = true;
   for (const file of [".env.local", ".env"]) {
-    const path = resolve(process.cwd(), file);
+    const path = resolve(/*turbopackIgnore: true*/ process.cwd(), file);
     if (existsSync(path)) process.loadEnvFile(path);
   }
 }

@@ -11,6 +11,37 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 type CacheEntry = { expires: number; body: unknown };
 
 const cache = new Map<string, CacheEntry>();
+const LIVE_PER_SECOND = 8;
+const recentLiveCalls: number[] = [];
+let liveGate: Promise<void> = Promise.resolve();
+
+export function retryWaitMs(resetHeader: string | null) {
+  const seconds = resetHeader ? Number(resetHeader) : Number.NaN;
+  const ms = Number.isFinite(seconds) ? seconds * 1000 : 1000;
+  return Math.min(Math.max(ms, 250), 2000);
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function reserveLiveSlot() {
+  const run = liveGate.then(async () => {
+    let now = Date.now();
+    while (recentLiveCalls.length > 0 && now - recentLiveCalls[0] >= 1000) recentLiveCalls.shift();
+    if (recentLiveCalls.length >= LIVE_PER_SECOND) {
+      await sleep(1000 - (now - recentLiveCalls[0]) + 50);
+      now = Date.now();
+      while (recentLiveCalls.length > 0 && now - recentLiveCalls[0] >= 1000) recentLiveCalls.shift();
+    }
+    recentLiveCalls.push(now);
+  });
+  liveGate = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
 
 export function qlooMode(): "live" | "fixture" {
   loadLocalEnv();
@@ -94,8 +125,11 @@ async function fetchLive(url: string, path: string): Promise<{ status: number; b
       signal: AbortSignal.timeout(20_000),
     });
 
+  await reserveLiveSlot();
   let response = await request();
   if (response.status === 429 || response.status >= 500) {
+    await sleep(retryWaitMs(response.headers.get("x-second-ratelimit-reset")));
+    await reserveLiveSlot();
     response = await request();
   }
   if (response.status === 429 || response.status >= 500) {

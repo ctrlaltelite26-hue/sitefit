@@ -18,7 +18,7 @@ export default function DealPage({ params }: PageProps<"/deals/[id]">) {
 async function DealBody({ params }: { params: PageProps<"/deals/[id]">["params"] }) {
   await connection();
   const { id } = await params;
-  const deal = getDeal(id);
+  const deal = await getDeal(id);
   if (!deal) notFound();
 
   return (
